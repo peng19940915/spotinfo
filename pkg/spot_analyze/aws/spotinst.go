@@ -20,13 +20,14 @@ import (
 
 var (
 	loadScoreOnce sync.Once
+	spotCores     *spotScoreData
 )
 
-type regionPrice struct {
+type instanceScore struct {
 	instance map[string]float64
 }
-type spotPriceData struct {
-	region map[string]regionPrice
+type spotScoreData struct {
+	region map[string]instanceScore
 }
 
 func getSpotinstCore(ctx context.Context, azs, instances []string) (scs []models.SpotinstScore, err error) {
@@ -112,9 +113,32 @@ func getSpotinstCores(ctx context.Context, azs, instances []string) (scs []model
 	return
 }
 
-func getSpotInstanceScore(instance, region string) (float64, error) {
+func getSpotInstanceScore(ctx context.Context, instance, region string, data *advisorData) (score float64, err error) {
 
 	loadScoreOnce.Do(func() {
-		scs := getSpotinstCores()
+		// 获取所有region/instance
+		var allRegion, allInstance []string
+		for k := range data.Regions {
+			allRegion = append(allRegion, k)
+		}
+		for k := range data.InstanceTypes {
+			allInstance = append(allInstance, k)
+		}
+		scs, err := getSpotinstCores(ctx, allRegion, allInstance)
+		if err != nil {
+			return
+		}
+		spotCores.region = make(map[string]instanceScore, 0)
+		for _, sc := range scs {
+			//score := make(map[string]float64, 0)
+			if _, ok := spotCores.region[sc.Az]; !ok {
+				spotCores.region[sc.Az] = instanceScore{
+					instance: make(map[string]float64, 0),
+				}
+			}
+			spotCores.region[sc.Az].instance[sc.InstanceType] = sc.Score
+		}
 	})
+	score = spotCores.region[region].instance[instance]
+	return
 }

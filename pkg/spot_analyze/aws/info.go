@@ -166,12 +166,12 @@ func dataLazyLoad(url string, timeout time.Duration) (result *advisorData, err e
 }
 
 // GetSpotSavings get spot saving advices
-func GetSpotSavings(regions []string, pattern, instanceOS string, cpu, memory int, price float64, sortBy int, sortDesc bool) ([]Advice, error) {
+func GetSpotSavings(ctx context.Context, regions []string, pattern, instanceOS string, cpu, memory int, price float64, sortBy int, sortDesc bool) ([]Advice, error) {
 	var err error
 
 	loadDataOnce.Do(func() {
 		const timeout = 10
-		data, err = dataLazyLoad(known.SpotAdvisorJSONURL, timeout*time.Second, embeddedSpotData)
+		data, err = dataLazyLoad(known.SpotAdvisorJSONURL, timeout*time.Second)
 	})
 
 	if err != nil {
@@ -228,7 +228,7 @@ func GetSpotSavings(regions []string, pattern, instanceOS string, cpu, memory in
 				}
 			}
 			// get spotinst score details
-
+			sportScore, err := getSpotInstanceScore(ctx, instance, region, data)
 			// prepare record
 			rng := Range{
 				Label: data.Ranges[adv.Range].Label,
@@ -240,6 +240,7 @@ func GetSpotSavings(regions []string, pattern, instanceOS string, cpu, memory in
 				Instance: instance,
 				Range:    rng,
 				Savings:  adv.Savings,
+				Score:    sportScore,
 				Info:     TypeInfo(info),
 				Price:    spotPrice,
 			})
