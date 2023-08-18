@@ -3,8 +3,6 @@ package aws
 import (
 	"context"
 	"crypto/tls"
-	_ "embed" //nolint:gci
-	"encoding/json"
 	"fmt"
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/hertz/pkg/app/client"
@@ -19,8 +17,7 @@ import (
 )
 
 var (
-	loadPriceOnce     sync.Once
-	embeddedPriceData string
+	loadPriceOnce sync.Once
 	// spot pricing data
 	spotPrice *spotPriceData
 	// aws region map: map between non-standard codes in spot pricing JS and AWS region code
@@ -76,13 +73,12 @@ type spotPriceData struct {
 }
 
 func pricingLazyLoad(url string, timeout time.Duration) (result *rawPriceData, err error) {
-
 	req, resp := protocol.AcquireRequest(), protocol.AcquireResponse()
 	defer func() {
 		protocol.ReleaseRequest(req)
 		protocol.ReleaseResponse(resp)
 	}()
-	req.SetMethod(consts.MethodPost)
+	req.SetMethod(consts.MethodGet)
 	req.SetRequestURI(url)
 	hClient, _ := client.NewClient(client.WithTLSConfig(&tls.Config{
 		InsecureSkipVerify: true,
@@ -101,8 +97,7 @@ func pricingLazyLoad(url string, timeout time.Duration) (result *rawPriceData, e
 
 	bodyString = strings.TrimPrefix(bodyString, responsePrefix)
 	bodyString = strings.TrimSuffix(bodyString, responseSuffix)
-	sonic.Unmarshal(resp.Body(), &result)
-	err = json.Unmarshal([]byte(bodyString), &result)
+	err = sonic.Unmarshal(resp.Body(), &result)
 	if err != nil {
 		return
 	}
@@ -152,7 +147,7 @@ func convertRawData(raw *rawPriceData) *spotPriceData {
 	return &pricing
 }
 
-func getSpotInstancePrice(instance, region, os string, embedded bool) (float64, error) {
+func getSpotInstancePrice(instance, region, os string) (float64, error) {
 	var (
 		err  error
 		data *rawPriceData

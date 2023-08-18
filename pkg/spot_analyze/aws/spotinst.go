@@ -1,4 +1,4 @@
-package spotinst
+package aws
 
 import (
 	"context"
@@ -14,8 +14,20 @@ import (
 	"os"
 	"spotinfo/pkg/known"
 	"spotinfo/pkg/models"
+	"sync"
 	"time"
 )
+
+var (
+	loadScoreOnce sync.Once
+)
+
+type regionPrice struct {
+	instance map[string]float64
+}
+type spotPriceData struct {
+	region map[string]regionPrice
+}
 
 func getSpotinstCore(ctx context.Context, azs, instances []string) (scs []models.SpotinstScore, err error) {
 	SpotinstAccessToken, exist := os.LookupEnv("SpotinstAccessToken")
@@ -78,7 +90,7 @@ func getSpotinstCore(ctx context.Context, azs, instances []string) (scs []models
 	return
 }
 
-func GetSpotinstCore(ctx context.Context, azs, instances []string) (scs []models.SpotinstScore, err error) {
+func getSpotinstCores(ctx context.Context, azs, instances []string) (scs []models.SpotinstScore, err error) {
 	batch := 8
 	for i := 0; i < len(instances); i++ {
 
@@ -98,4 +110,11 @@ func GetSpotinstCore(ctx context.Context, azs, instances []string) (scs []models
 		}
 	}
 	return
+}
+
+func getSpotInstanceScore(instance, region string) (float64, error) {
+
+	loadScoreOnce.Do(func() {
+		scs := getSpotinstCores()
+	})
 }

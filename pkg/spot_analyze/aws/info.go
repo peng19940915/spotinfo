@@ -1,8 +1,13 @@
 package aws
 
 import (
-	"encoding/json"
-	"net/http"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"github.com/bytedance/sonic"
+	"github.com/cloudwego/hertz/pkg/app/client"
+	"github.com/cloudwego/hertz/pkg/protocol"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"regexp"
 	"sort"
 	"spotinfo/pkg/known"
@@ -133,48 +138,34 @@ func (a ByRegion) Len() int           { return len(a) }
 func (a ByRegion) Less(i, j int) bool { return strings.Compare(a[i].Region, a[j].Region) == -1 }
 func (a ByRegion) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
-func dataLazyLoad(url string, timeout time.Duration, fallbackData string) (*advisorData, error) {
-	var result advisorData
-	// try to load new data
-	client := &http.Client{Timeout: timeout}
-
-	resp, err := client.Get(url)
-	if err != nil {
-		goto fallback
-	}
-
+func dataLazyLoad(url string, timeout time.Duration) (result *advisorData, err error) {
+	req, resp := protocol.AcquireRequest(), protocol.AcquireResponse()
 	defer func() {
-		err = resp.Body.Close()
+		protocol.ReleaseRequest(req)
+		protocol.ReleaseResponse(resp)
 	}()
+	req.SetMethod(consts.MethodGet)
+	req.SetRequestURI(url)
+	hClient, _ := client.NewClient(client.WithTLSConfig(&tls.Config{
+		InsecureSkipVerify: true,
+	}))
 
-	if resp.StatusCode != http.StatusOK {
-		goto fallback
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		goto fallback
-	}
-
-	return &result, nil
-
-	// fallback to embedded load
-fallback:
-	err = json.Unmarshal([]byte(fallbackData), &result)
+	err = hClient.DoTimeout(context.TODO(), req, resp, timeout)
 
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse embedded spot data")
+		return
 	}
 
-	// set embedded loaded flag true
-	result.Embedded = true
+	if resp.StatusCode() != consts.StatusOK {
+		err = errors.New(fmt.Sprintf("url:%s code: %d, detail:%s", url, resp.StatusCode(), string(resp.Body())))
+		return
+	}
+	err = sonic.Unmarshal(resp.Body(), &result)
 
-	return &result, nil
+	return result, nil
 }
 
 // GetSpotSavings get spot saving advices
-//
-//nolint:gocognit,gocyclo
 func GetSpotSavings(regions []string, pattern, instanceOS string, cpu, memory int, price float64, sortBy int, sortDesc bool) ([]Advice, error) {
 	var err error
 
@@ -213,7 +204,6 @@ func GetSpotSavings(regions []string, pattern, instanceOS string, cpu, memory in
 		} else {
 			return nil, errors.New("invalid instance OS, must be windows/linux")
 		}
-
 		// construct advices result
 		for instance, adv := range advices {
 			// match instance type name
@@ -221,7 +211,6 @@ func GetSpotSavings(regions []string, pattern, instanceOS string, cpu, memory in
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to match instance type")
 			}
-
 			if !matched { // skip not matched
 				continue
 			}
@@ -231,13 +220,14 @@ func GetSpotSavings(regions []string, pattern, instanceOS string, cpu, memory in
 				continue
 			}
 			// get price details
-			spotPrice, err := getSpotInstancePrice(instance, region, instanceOS, false)
+			spotPrice, err := getSpotInstancePrice(instance, region, instanceOS)
 			if err == nil {
 				// filter by max price
 				if price != 0 && spotPrice > price {
 					continue
 				}
 			}
+			// get spotinst score details
 
 			// prepare record
 			rng := Range{
@@ -245,7 +235,6 @@ func GetSpotSavings(regions []string, pattern, instanceOS string, cpu, memory in
 				Max:   data.Ranges[adv.Range].Max,
 				Min:   minRange[data.Ranges[adv.Range].Max],
 			}
-
 			result = append(result, Advice{
 				Region:   region,
 				Instance: instance,
