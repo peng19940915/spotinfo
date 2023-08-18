@@ -1,0 +1,3 @@
+package known
+
+var SPotinstUserToken = ""
