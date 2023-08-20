@@ -77,6 +77,14 @@ func printAdvicesTable(advices []models.Advice, region bool, mode string) {
 	t.AppendHeader(header)
 	for _, advice := range advices {
 		row := table.Row{}
+		tableColumnConfigs = append(tableColumnConfigs, table.ColumnConfig{
+			Name:        instanceTypeColumn,
+			Number:      3,
+			AutoMerge:   true,
+			Align:       text.AlignLeft,
+			AlignHeader: text.AlignCenter,
+			AlignFooter: text.AlignCenter,
+		})
 		switch mode {
 		case known.ScoreMode:
 			tableColumnConfigs = append(tableColumnConfigs, table.ColumnConfig{
@@ -136,6 +144,11 @@ func printAdvicesTable(advices []models.Advice, region bool, mode string) {
 	t.SetStyle(table.StyleLight)
 	t.Style().Options.SeparateRows = true
 	t.SortBy([]table.SortBy{
+		{
+			Name:   instanceTypeColumn,
+			Number: 3,
+			Mode:   table.Asc,
+		},
 		{
 			Name:   azColumn,
 			Number: 2,

@@ -176,7 +176,7 @@ func GetSpotSavings(ctx context.Context, opts *options.SpotinstOptions) ([]model
 			}
 			// filter by min vCPU and memory
 			info := data.InstanceTypes[instance]
-			if (opts.MinCpu != 0 && info.Cores < opts.MinCpu) || (opts.MinMemory != 0 && info.RAM < float32(opts.MinMemory)) {
+			if (opts.MaxCpu != 0 && info.Cores > opts.MaxCpu) || (opts.MaxMemory != 0 && info.RAM > float32(opts.MaxMemory)) {
 				continue
 			}
 			// get price details

@@ -10,8 +10,8 @@ type SpotinstOptions struct {
 	Type      string
 	Region    []string
 	Mode      string
-	MinCpu    int
-	MinMemory int
+	MaxCpu    int
+	MaxMemory int
 	Sort      string
 	Order     string
 	Os        string
@@ -31,8 +31,8 @@ func NewSpotinstOptions() *SpotinstOptions {
 func (o *SpotinstOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVarP(&o.Type, "instance_type", "i", "", "EC2 instance type (can be RE2 regexp patten)")
 	flags.StringSliceVarP(&o.Region, "region", "r", []string{"all"}, "set one or more AWS regions, use \"all\" for all AWS regions")
-	flags.IntVarP(&o.MinCpu, "cpu", "c", 0, "filter: minimal vCPU cores")
-	flags.IntVarP(&o.MinMemory, "memory", "m", 0, "filter: minimal memory GiB")
+	flags.IntVarP(&o.MaxCpu, "cpu", "c", 0, "filter: minimal vCPU cores")
+	flags.IntVarP(&o.MaxMemory, "memory", "m", 0, "filter: minimal memory GiB")
 	flags.StringVarP(&o.Sort, "sort", "s", "s", "sort results by interruption|type|savings|price|region|score")
 	flags.StringVarP(&o.Order, "order", "o", "desc", "sort order asc|desc")
 	flags.StringVar(&o.Os, "os", "Linux", "os type")
