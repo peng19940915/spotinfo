@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/hertz/pkg/app/client"
-	"github.com/cloudwego/hertz/pkg/common/hlog"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/panjf2000/ants/v2"
 	"net/url"
 	"os"
 	"spotinfo/pkg/known"
@@ -20,22 +20,19 @@ import (
 
 var (
 	loadScoreOnce sync.Once
-	spotCores     *spotScoreData
+	spotScores    *spotScoreData
 )
 
 type instanceScore struct {
-	instance map[string]float64
+	Instance map[string]int `json:"instance"`
 }
 type spotScoreData struct {
-	region map[string]instanceScore
+	Azs map[string]instanceScore `json:"azs"`
 }
 
-func getSpotinstCore(ctx context.Context, azs, instances []string) (scs []models.SpotinstScore, err error) {
-	SpotinstAccessToken, exist := os.LookupEnv("SpotinstAccessToken")
-	if !exist {
-		err = errors.New("env: SpotinstAccessToken not exist")
-		return
-	}
+func getSpotinstScore(param interface{}) {
+	ap := param.(*AntsParams)
+	SpotinstAccessToken, _ := os.LookupEnv("SpotinstAccessToken")
 	uri, _ := url.JoinPath(known.SpotHost, known.SpotMarketScoreUri)
 	req, resp := protocol.AcquireRequest(), protocol.AcquireResponse()
 	defer func() {
@@ -47,14 +44,15 @@ func getSpotinstCore(ctx context.Context, azs, instances []string) (scs []models
 	req.SetQueryString(fmt.Sprintf("accountId=%s", known.SpotAccountId))
 
 	var bodyMap = make(map[string]interface{}, 0)
-	bodyMap["availabilityZones"] = azs
-	bodyMap["instanceTypes"] = instances
-	bodyMap["product"] = "Linux/UNIX"
+	bodyMap["availabilityZones"] = ap.Azs
+	bodyMap["instanceTypes"] = ap.Instances
+	bodyMap["product"] = "Linux/UNIX (Amazon VPC)"
 	bodyMap["minimumInstanceLifetime"] = []int{1}
-
+	//https://console.spotinst.com/api/aws/ec2/availabilityZone?accountId=act-4321e68e&region=us-east-3
+	//
 	requestBody, _ := sonic.Marshal(bodyMap)
 	req.SetBody(requestBody)
-
+	fmt.Println(string(requestBody))
 	req.SetHeaders(map[string]string{
 		"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
 		"Accept":     "application/json, text/plain, */*",
@@ -67,7 +65,7 @@ func getSpotinstCore(ctx context.Context, azs, instances []string) (scs []models
 		InsecureSkipVerify: true,
 	}))
 
-	err = hClient.DoTimeout(ctx, req, resp, 6*time.Second)
+	err := hClient.DoTimeout(ap.Ctx, req, resp, 30*time.Second)
 	if err != nil {
 		return
 	}
@@ -82,19 +80,44 @@ func getSpotinstCore(ctx context.Context, azs, instances []string) (scs []models
 			var ss = models.SpotinstScore{
 				InstanceType: marketScore.InstanceType,
 				Az:           marketScore.AvailabilityZone,
-				Score:        marketScore.Score,
+				Score:        int(marketScore.Score),
 			}
-			scs = append(scs, ss)
+			ap.Scs.Lock.Lock()
+			ap.Scs.SS = append(ap.Scs.SS, ss)
+			ap.Scs.Lock.Unlock()
 		}
 	}
 
 	return
 }
 
-func getSpotinstCores(ctx context.Context, azs, instances []string) (scs []models.SpotinstScore, err error) {
-	batch := 8
-	for i := 0; i < len(instances); i++ {
+type AntsParams struct {
+	Azs       []string
+	Ctx       context.Context
+	Instances []string
+	Scs       *models.SpotinstScores
+}
 
+func getSpotinstScores(ctx context.Context, instances []string) (scs *models.SpotinstScores, err error) {
+	batch := 50
+	var wg sync.WaitGroup
+	scs = &models.SpotinstScores{
+		Lock: sync.RWMutex{},
+		SS:   []models.SpotinstScore{},
+	}
+	var allAzs []string
+	{
+	}
+	for _, azs := range known.AvailablespotinstAzs {
+		allAzs = append(allAzs, azs...)
+	}
+	p, _ := ants.NewPoolWithFunc(10, func(params interface{}) {
+		getSpotinstScore(params)
+		wg.Done()
+	})
+	defer p.Release()
+
+	for i := 0; i < len(instances); i++ {
 		if i%batch == 0 && i > 0 || i == len(instances)-1 {
 			start := ((i / batch) - 1) * batch
 			end := start + batch
@@ -102,20 +125,39 @@ func getSpotinstCores(ctx context.Context, azs, instances []string) (scs []model
 				start = (i / batch) * batch
 				end = len(instances)
 			}
-			tmpScs, err := getSpotinstCore(ctx, azs, instances[start:end])
-			if err != nil {
-				hlog.Error(err.Error())
-				continue
+			// 并发
+			ap := &AntsParams{
+				Ctx:       ctx,
+				Azs:       allAzs,
+				Instances: instances[start:end],
+				Scs:       scs,
 			}
-			scs = append(scs, tmpScs...)
+			wg.Add(1)
+			_ = p.Invoke(ap)
 		}
 	}
+
+	wg.Wait()
+
 	return
 }
 
-func getSpotInstanceScore(ctx context.Context, instance, region string, data *advisorData) (score float64, err error) {
-
+func getSpotInstanceScore(ctx context.Context, instance, az string, data *models.AdvisorData) (score int, err error) {
 	loadScoreOnce.Do(func() {
+		awsScoreJsonPath := "/tmp/score.json"
+		if f, err := os.Stat(awsScoreJsonPath); err == nil && f.Size() >= 100 {
+			// 判断文件时间
+			if time.Now().Sub(f.ModTime()) < 24*time.Hour {
+				// 从文件中加载数据
+				fmt.Println("load score data from cache...")
+				content, _ := os.ReadFile(awsScoreJsonPath)
+				err = sonic.Unmarshal(content, &spotScores)
+				return
+			}
+		} else {
+			os.Create(awsScoreJsonPath)
+		}
+		fmt.Println("missing score cache, load from remote...")
 		// 获取所有region/instance
 		var allRegion, allInstance []string
 		for k := range data.Regions {
@@ -124,21 +166,27 @@ func getSpotInstanceScore(ctx context.Context, instance, region string, data *ad
 		for k := range data.InstanceTypes {
 			allInstance = append(allInstance, k)
 		}
-		scs, err := getSpotinstCores(ctx, allRegion, allInstance)
+		scs, err := getSpotinstScores(ctx, allInstance)
 		if err != nil {
 			return
 		}
-		spotCores.region = make(map[string]instanceScore, 0)
-		for _, sc := range scs {
+		spotScores = &spotScoreData{}
+		spotScores.Azs = make(map[string]instanceScore, 0)
+		for _, sc := range scs.SS {
 			//score := make(map[string]float64, 0)
-			if _, ok := spotCores.region[sc.Az]; !ok {
-				spotCores.region[sc.Az] = instanceScore{
-					instance: make(map[string]float64, 0),
+			if _, ok := spotScores.Azs[sc.Az]; !ok {
+				spotScores.Azs[sc.Az] = instanceScore{
+					Instance: make(map[string]int, 0),
 				}
 			}
-			spotCores.region[sc.Az].instance[sc.InstanceType] = sc.Score
+			spotScores.Azs[sc.Az].Instance[sc.InstanceType] = sc.Score
 		}
+		contentByte, err := sonic.Marshal(spotScores)
+		if err != nil {
+			fmt.Println(err)
+		}
+		os.WriteFile(awsScoreJsonPath, contentByte, 0644)
 	})
-	score = spotCores.region[region].instance[instance]
+	score = spotScores.Azs[az].Instance[instance]
 	return
 }

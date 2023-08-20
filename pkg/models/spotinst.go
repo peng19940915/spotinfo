@@ -1,8 +1,14 @@
 package models
 
+import "sync"
+
+type SpotinstScores struct {
+	Lock sync.RWMutex
+	SS   []SpotinstScore
+}
 type SpotinstScore struct {
 	Az           string
-	Score        float64
+	Score        int
 	InstanceType string
 }
 

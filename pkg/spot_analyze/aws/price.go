@@ -8,6 +8,8 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/client"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"os"
+	"spotinfo/pkg/known"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,7 +36,6 @@ var (
 const (
 	responsePrefix = "callback("
 	responseSuffix = ");"
-	spotPriceJsURL = "https://spot-price.s3.amazonaws.com/spot.js"
 )
 
 type rawPriceData struct {
@@ -62,17 +63,18 @@ type rawPriceData struct {
 }
 
 type instancePrice struct {
-	linux   float64
-	windows float64
+	Linux   float64 `json:"linux"`
+	Windows float64 `json:"windows"`
 }
 type regionPrice struct {
-	instance map[string]instancePrice
+	Instance map[string]instancePrice `json:"instance"`
 }
 type spotPriceData struct {
-	region map[string]regionPrice
+	Region map[string]regionPrice `json:"region"`
 }
 
 func pricingLazyLoad(url string, timeout time.Duration) (result *rawPriceData, err error) {
+	result = &rawPriceData{}
 	req, resp := protocol.AcquireRequest(), protocol.AcquireResponse()
 	defer func() {
 		protocol.ReleaseRequest(req)
@@ -97,7 +99,7 @@ func pricingLazyLoad(url string, timeout time.Duration) (result *rawPriceData, e
 
 	bodyString = strings.TrimPrefix(bodyString, responsePrefix)
 	bodyString = strings.TrimSuffix(bodyString, responseSuffix)
-	err = sonic.Unmarshal(resp.Body(), &result)
+	err = sonic.UnmarshalString(bodyString, &result)
 	if err != nil {
 		return
 	}
@@ -114,11 +116,11 @@ func pricingLazyLoad(url string, timeout time.Duration) (result *rawPriceData, e
 func convertRawData(raw *rawPriceData) *spotPriceData {
 	// fill priceData from rawPriceData
 	var pricing spotPriceData
-	pricing.region = make(map[string]regionPrice)
+	pricing.Region = make(map[string]regionPrice)
 
 	for _, region := range raw.Config.Regions {
 		var rp regionPrice
-		rp.instance = make(map[string]instancePrice)
+		rp.Instance = make(map[string]instancePrice)
 
 		for _, it := range region.InstanceTypes {
 			for _, size := range it.Sizes {
@@ -131,51 +133,74 @@ func convertRawData(raw *rawPriceData) *spotPriceData {
 					}
 
 					if os.Name == "mswin" {
-						ip.windows = price
+						ip.Windows = price
 					} else {
-						ip.linux = price
+						ip.Linux = price
 					}
 				}
 
-				rp.instance[size.Size] = ip
+				rp.Instance[size.Size] = ip
 			}
 		}
 
-		pricing.region[region.Region] = rp
+		pricing.Region[region.Region] = rp
 	}
 
 	return &pricing
 }
 
-func getSpotInstancePrice(instance, region, os string) (float64, error) {
+func getSpotInstancePrice(instance, region, instanceOs string) (float64, error) {
 	var (
 		err  error
 		data *rawPriceData
 	)
-
 	loadPriceOnce.Do(func() {
-		const timeout = 10
-		data, err = pricingLazyLoad(spotPriceJsURL, timeout*time.Second)
+		// 先从本地加载数据
+		awsPriceJsonPath := "/tmp/price.json"
+		if f, err := os.Stat(awsPriceJsonPath); err == nil && f.Size() >= 100 {
+			// 判断文件时间
+			if time.Now().Sub(f.ModTime()) < 24*time.Hour {
+				// 从文件中加载数据
+				fmt.Println("load price data from cache...")
+				content, _ := os.ReadFile(awsPriceJsonPath)
+				err = sonic.Unmarshal(content, &spotPrice)
+				return
+			}
+		} else {
+			os.Create(awsPriceJsonPath)
+		}
+		fmt.Println("missing price cache, load from remote...")
+		data, err = pricingLazyLoad(known.SpotPriceJsURL, 1*time.Minute)
+		if err != nil {
+			fmt.Println("pricingLazyLoad failed, detail: ", err.Error())
+			return
+		}
 		spotPrice = convertRawData(data)
+
+		contentByte, err := sonic.Marshal(spotPrice)
+		if err != nil {
+			fmt.Println(err)
+		}
+		os.WriteFile(awsPriceJsonPath, contentByte, 0644)
 	})
 
 	if err != nil {
 		return 0, errors.Wrap(err, "failed to load spot instance pricing")
 	}
 
-	rp, ok := spotPrice.region[region]
+	rp, ok := spotPrice.Region[region]
 	if !ok {
 		return 0, errors.Errorf("no pricind fata for region: %v", region)
 	}
 
-	price, ok := rp.instance[instance]
+	price, ok := rp.Instance[instance]
 	if !ok {
 		return 0, errors.Errorf("no pricind fata for instance: %v", instance)
 	}
 
-	if os == "windows" {
-		return price.windows, nil
+	if instanceOs == "windows" {
+		return price.Windows, nil
 	}
 
-	return price.linux, nil
+	return price.Linux, nil
 }

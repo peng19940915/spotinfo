@@ -8,9 +8,12 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/client"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"os"
 	"regexp"
 	"sort"
 	"spotinfo/pkg/known"
+	"spotinfo/pkg/models"
+	"spotinfo/pkg/options"
 	"strings"
 	"sync"
 	"time"
@@ -19,10 +22,9 @@ import (
 )
 
 var (
-	loadDataOnce     sync.Once
-	embeddedSpotData string
+	loadDataOnce sync.Once
 	// parsed json raw data
-	data *advisorData
+	data *models.AdvisorData
 	// min ranges
 	minRange = map[int]int{5: 0, 11: 6, 16: 12, 22: 17, 100: 23} //nolint:gomnd
 )
@@ -42,103 +44,44 @@ const (
 	SortByScore = iota
 )
 
-type interruptionRange struct {
-	Label string `json:"label"`
-	Index int    `json:"index"`
-	Dots  int    `json:"dots"`
-	Max   int    `json:"max"`
-}
-
-type instanceType struct {
-	Cores int     `json:"cores"`
-	Emr   bool    `json:"emr"`
-	RAM   float32 `json:"ram_gb"` //nolint:tagliatelle
-}
-
-type advice struct {
-	Range   int `json:"r"`
-	Savings int `json:"s"`
-}
-
-type osTypes struct {
-	Windows map[string]advice `json:"Windows"` //nolint:tagliatelle
-	Linux   map[string]advice `json:"Linux"`   //nolint:tagliatelle
-}
-
-type advisorData struct {
-	Ranges        []interruptionRange     `json:"ranges"`
-	InstanceTypes map[string]instanceType `json:"instance_types"` //nolint:tagliatelle
-	Regions       map[string]osTypes      `json:"spot_advisor"`   //nolint:tagliatelle
-	Embedded      bool                    // true if loaded from embedded copy
-}
-
 //---- public types
 
-// Range interruption range
-type Range struct {
-	Label string `json:"label"`
-	Min   int    `json:"min"`
-	Max   int    `json:"max"`
-}
-
-// TypeInfo instance type details: vCPU cores, memory, cam  run in EMR
-type TypeInfo instanceType
-
-// Advice - spot price advice: interruption range and savings
-type Advice struct {
-	Region    string
-	Instance  string
-	Range     Range
-	Savings   int
-	Info      TypeInfo
-	Price     float64
-	Score     float64
-	ZonePrice map[string]float64
-}
-
 // ByRange implements sort.Interface based on the Range.Min field
-type ByRange []Advice
+type ByRange []models.Advice
 
 func (a ByRange) Len() int           { return len(a) }
 func (a ByRange) Less(i, j int) bool { return a[i].Range.Min < a[j].Range.Min }
 func (a ByRange) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
 // ByInstance implements sort.Interface based on the Instance field
-type ByInstance []Advice
+type ByInstance []models.Advice
 
 func (a ByInstance) Len() int           { return len(a) }
 func (a ByInstance) Less(i, j int) bool { return strings.Compare(a[i].Instance, a[j].Instance) == -1 }
 func (a ByInstance) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
 // BySavings implements sort.Interface based on the Savings field
-type BySavings []Advice
+type BySavings []models.Advice
 
 func (a BySavings) Len() int           { return len(a) }
 func (a BySavings) Less(i, j int) bool { return a[i].Savings < a[j].Savings }
 func (a BySavings) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
 // ByPrice implements sort.Interface based on the Price field
-type ByPrice []Advice
+type ByPrice []models.Advice
 
 func (a ByPrice) Len() int           { return len(a) }
 func (a ByPrice) Less(i, j int) bool { return a[i].Price < a[j].Price }
 func (a ByPrice) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
-// ByScore implements sort.Interface based on the Price field
-type ByScore []Advice
-
-func (a ByScore) Len() int           { return len(a) }
-func (a ByScore) Less(i, j int) bool { return a[i].Score < a[j].Score }
-func (a ByScore) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-
 // ByRegion implements sort.Interface based on the Region field
-type ByRegion []Advice
+type ByRegion []models.Advice
 
 func (a ByRegion) Len() int           { return len(a) }
 func (a ByRegion) Less(i, j int) bool { return strings.Compare(a[i].Region, a[j].Region) == -1 }
 func (a ByRegion) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
-func dataLazyLoad(url string, timeout time.Duration) (result *advisorData, err error) {
+func dataLazyLoad(url string, timeout time.Duration) (result *models.AdvisorData, err error) {
 	req, resp := protocol.AcquireRequest(), protocol.AcquireResponse()
 	defer func() {
 		protocol.ReleaseRequest(req)
@@ -166,20 +109,37 @@ func dataLazyLoad(url string, timeout time.Duration) (result *advisorData, err e
 }
 
 // GetSpotSavings get spot saving advices
-func GetSpotSavings(ctx context.Context, regions []string, pattern, instanceOS string, cpu, memory int, price float64, sortBy int, sortDesc bool) ([]Advice, error) {
+func GetSpotSavings(ctx context.Context, opts *options.SpotinstOptions) ([]models.Advice, error) {
 	var err error
-
 	loadDataOnce.Do(func() {
 		const timeout = 10
+		// 先从本地加载数据
+		infoJsonPath := "/tmp/info.json"
+		if f, err := os.Stat(infoJsonPath); err == nil && f.Size() >= 100 {
+			// 判断文件时间
+			if time.Now().Sub(f.ModTime()) < 24*time.Hour {
+				// 从文件中加载数据
+				fmt.Println("load info data from cache...")
+				content, _ := os.ReadFile(infoJsonPath)
+				err = sonic.Unmarshal(content, &data)
+				return
+
+			}
+		} else {
+			os.Create(infoJsonPath)
+		}
+		fmt.Println("missing info cache, load from remote...")
 		data, err = dataLazyLoad(known.SpotAdvisorJSONURL, timeout*time.Second)
+		contentByte, _ := sonic.Marshal(data)
+		os.WriteFile(infoJsonPath, contentByte, 0644)
 	})
 
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to load spot data")
 	}
-
+	var regions = opts.Region
 	// special case: "all" regions (slice with single element)
-	if len(regions) == 1 && regions[0] == "all" {
+	if len(opts.Region) == 1 && opts.Region[0] == "all" {
 		// replace regions with all available regions
 		regions = make([]string, 0, len(data.Regions))
 		for k := range data.Regions {
@@ -188,7 +148,7 @@ func GetSpotSavings(ctx context.Context, regions []string, pattern, instanceOS s
 	}
 
 	// get advices for specified regions
-	var result []Advice
+	var result []models.Advice
 
 	for _, region := range regions {
 		r, ok := data.Regions[region]
@@ -196,18 +156,18 @@ func GetSpotSavings(ctx context.Context, regions []string, pattern, instanceOS s
 			return nil, errors.Errorf("no spot price for region %s", region)
 		}
 
-		var advices map[string]advice
-		if strings.EqualFold("windows", instanceOS) {
-			advices = r.Windows
-		} else if strings.EqualFold("linux", instanceOS) {
-			advices = r.Linux
+		var spotInfos map[string]models.SpotInfo
+		if strings.EqualFold("windows", opts.Os) {
+			spotInfos = r.Windows
+		} else if strings.EqualFold("linux", opts.Os) {
+			spotInfos = r.Linux
 		} else {
 			return nil, errors.New("invalid instance OS, must be windows/linux")
 		}
 		// construct advices result
-		for instance, adv := range advices {
+		for instance, adv := range spotInfos {
 			// match instance type name
-			matched, err := regexp.MatchString(pattern, instance)
+			matched, err := regexp.MatchString(opts.Type, instance)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to match instance type")
 			}
@@ -216,33 +176,40 @@ func GetSpotSavings(ctx context.Context, regions []string, pattern, instanceOS s
 			}
 			// filter by min vCPU and memory
 			info := data.InstanceTypes[instance]
-			if (cpu != 0 && info.Cores < cpu) || (memory != 0 && info.RAM < float32(memory)) {
+			if (opts.MinCpu != 0 && info.Cores < opts.MinCpu) || (opts.MinMemory != 0 && info.RAM < float32(opts.MinMemory)) {
 				continue
 			}
 			// get price details
-			spotPrice, err := getSpotInstancePrice(instance, region, instanceOS)
-			if err == nil {
-				// filter by max price
-				if price != 0 && spotPrice > price {
-					continue
+			spotPriceDatas, err := getSpotInstancePrice(instance, region, opts.Os)
+
+			var spotScoreMaps = make(map[string]int)
+			// get spotinst score details
+
+			if azs, ok := known.AvailablespotinstAzs[region]; ok && opts.Mode == known.ScoreMode {
+				for _, az := range azs {
+					score, err := getSpotInstanceScore(ctx, instance, az, data)
+					if err != nil {
+						fmt.Println("get spot instance score failed", err)
+						continue
+					}
+					spotScoreMaps[az] = score
 				}
 			}
-			// get spotinst score details
-			sportScore, err := getSpotInstanceScore(ctx, instance, region, data)
+
 			// prepare record
-			rng := Range{
+			rng := models.InterruptionRange{
 				Label: data.Ranges[adv.Range].Label,
 				Max:   data.Ranges[adv.Range].Max,
 				Min:   minRange[data.Ranges[adv.Range].Max],
 			}
-			result = append(result, Advice{
+			result = append(result, models.Advice{
 				Region:   region,
 				Instance: instance,
 				Range:    rng,
 				Savings:  adv.Savings,
-				Score:    sportScore,
-				Info:     TypeInfo(info),
-				Price:    spotPrice,
+				Score:    spotScoreMaps,
+				Info:     models.TypeInfo(info),
+				Price:    spotPriceDatas,
 			})
 		}
 	}
@@ -250,24 +217,22 @@ func GetSpotSavings(ctx context.Context, regions []string, pattern, instanceOS s
 	// sort results by - range (default)
 	var data sort.Interface
 
-	switch sortBy {
-	case SortByRange:
+	switch opts.Sort {
+	case "rage":
 		data = ByRange(result)
-	case SortByInstance:
+	case "instance":
 		data = ByInstance(result)
-	case SortBySavings:
+	case "saving":
 		data = BySavings(result)
-	case SortByPrice:
+	case "price":
 		data = ByPrice(result)
-	case SortByRegion:
+	case "region":
 		data = ByRegion(result)
-	case SortByScore:
-		data = ByScore(result)
 	default:
 		data = ByRange(result)
 	}
 
-	if sortDesc {
+	if opts.Order == "desc" {
 		data = sort.Reverse(data)
 	}
 

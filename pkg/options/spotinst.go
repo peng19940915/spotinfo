@@ -1,12 +1,20 @@
 package options
 
-import "github.com/spf13/pflag"
+import (
+	"github.com/spf13/pflag"
+)
 
 type SpotinstOptions struct {
-	UserName string
-	Password string
-	AZs      []string
-	//InstanceTypes []string
+	UserName  string
+	Password  string
+	Type      string
+	Region    []string
+	Mode      string
+	MinCpu    int
+	MinMemory int
+	Sort      string
+	Order     string
+	Os        string
 }
 
 var defaultAzs = []string{
@@ -21,8 +29,12 @@ func NewSpotinstOptions() *SpotinstOptions {
 }
 
 func (o *SpotinstOptions) AddFlags(flags *pflag.FlagSet) {
-	//flags.StringVarP(&o.Password, "password", "p", "", "password of spotinst")
-	//flags.StringVarP(&o.UserName, "username", "u", "", "username of spotinst")
-	//flags.StringSliceVarP(&o.AZs, "", "", defaultAzs, "")
-	//flags.StringSliceVarP(&o.InstanceTypes, "", "", []string{}, "")
+	flags.StringVarP(&o.Type, "instance_type", "i", "", "EC2 instance type (can be RE2 regexp patten)")
+	flags.StringSliceVarP(&o.Region, "region", "r", []string{"all"}, "set one or more AWS regions, use \"all\" for all AWS regions")
+	flags.IntVarP(&o.MinCpu, "cpu", "c", 0, "filter: minimal vCPU cores")
+	flags.IntVarP(&o.MinMemory, "memory", "m", 0, "filter: minimal memory GiB")
+	flags.StringVarP(&o.Sort, "sort", "s", "s", "sort results by interruption|type|savings|price|region|score")
+	flags.StringVarP(&o.Order, "order", "o", "desc", "sort order asc|desc")
+	flags.StringVar(&o.Os, "os", "Linux", "os type")
+	flags.StringVar(&o.Mode, "mode", "score", "score|normal")
 }
